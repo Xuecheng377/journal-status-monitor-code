@@ -187,10 +187,23 @@
     }
   }
 
-  async function restore(needle) {
+  let restoring = false;
+
+  async function restore(needle, button) {
     if (!token()) {
       setHealth("idle", "还没有填 GitHub Token", "恢复监测需要写权限。");
       return;
+    }
+    // The file write is a read-modify-write on GitHub, so a second click
+    // before the first finishes would restore twice or fail with a conflict.
+    if (restoring) {
+      return;
+    }
+    restoring = true;
+    const label = button ? button.textContent : "";
+    if (button) {
+      button.disabled = true;
+      button.textContent = "恢复中...";
     }
     try {
       const result = await post("/api/unarchive", { githubToken: token(), needle });
@@ -198,6 +211,12 @@
       await refreshStatus();
     } catch (error) {
       setHealth("error", "恢复失败", error.message);
+    } finally {
+      restoring = false;
+      if (button) {
+        button.disabled = false;
+        button.textContent = label;
+      }
     }
   }
 
@@ -210,7 +229,7 @@
     }
     const restoreBtn = event.target.closest("[data-unarchive]");
     if (restoreBtn) {
-      restore(restoreBtn.dataset.unarchive);
+      restore(restoreBtn.dataset.unarchive, restoreBtn);
     }
   });
 

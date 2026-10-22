@@ -1,3 +1,22 @@
+const GITHUB_TIMEOUT_MS = 20000;
+
+// Requests without a deadline can hang forever: the caller gives up, but the
+// server keeps a socket open and the UI spins until it is restarted.
+function githubFetch(url, options = {}) {
+  const { timeoutMs = GITHUB_TIMEOUT_MS, ...rest } = options;
+  const signal = rest.signal ?? AbortSignal.timeout(timeoutMs);
+  return fetch(url, { ...rest, signal }).catch((error) => {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      const timeoutError = new Error(
+        `请求 GitHub 超时（${Math.round(timeoutMs / 1000)} 秒），请检查网络后重试。`
+      );
+      timeoutError.status = 504;
+      throw timeoutError;
+    }
+    throw error;
+  });
+}
+
 function repoApiBase(owner, repo) {
   return `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
 }
@@ -54,14 +73,14 @@ async function encryptSecret(value, publicKey, sodiumModule) {
   return sodium.to_base64(encryptedBytes, sodium.base64_variants?.ORIGINAL);
 }
 
-async function getRepoPublicKey({ owner, repo, token, fetchImpl = fetch }) {
+async function getRepoPublicKey({ owner, repo, token, fetchImpl = githubFetch }) {
   const response = await fetchImpl(`${repoApiBase(owner, repo)}/actions/secrets/public-key`, {
     headers: githubHeaders(token),
   });
   return readJsonResponse(response, "Could not fetch repository public key.");
 }
 
-async function putRepoSecret({ owner, repo, token, name, value, fetchImpl = fetch, sodiumModule }) {
+async function putRepoSecret({ owner, repo, token, name, value, fetchImpl = githubFetch, sodiumModule }) {
   const publicKey = await getRepoPublicKey({ owner, repo, token, fetchImpl });
   const encryptedValue = await encryptSecret(value, publicKey.key, sodiumModule);
   const response = await fetchImpl(`${repoApiBase(owner, repo)}/actions/secrets/${encodeURIComponent(name)}`, {
@@ -76,7 +95,7 @@ async function putRepoSecret({ owner, repo, token, name, value, fetchImpl = fetc
   return { name, status: "updated" };
 }
 
-async function deleteRepoSecret({ owner, repo, token, name, fetchImpl = fetch, ignoreNotFound = true }) {
+async function deleteRepoSecret({ owner, repo, token, name, fetchImpl = githubFetch, ignoreNotFound = true }) {
   const response = await fetchImpl(`${repoApiBase(owner, repo)}/actions/secrets/${encodeURIComponent(name)}`, {
     method: "DELETE",
     headers: githubHeaders(token),
@@ -88,7 +107,7 @@ async function deleteRepoSecret({ owner, repo, token, name, fetchImpl = fetch, i
   return { name, status: "deleted" };
 }
 
-async function listRepoSecrets({ owner, repo, token, fetchImpl = fetch }) {
+async function listRepoSecrets({ owner, repo, token, fetchImpl = githubFetch }) {
   const response = await fetchImpl(`${repoApiBase(owner, repo)}/actions/secrets?per_page=100`, {
     headers: githubHeaders(token),
   });
@@ -96,7 +115,7 @@ async function listRepoSecrets({ owner, repo, token, fetchImpl = fetch }) {
   return Object.fromEntries((body.secrets || []).map((secret) => [secret.name, true]));
 }
 
-async function dispatchWorkflow({ owner, repo, token, workflow = "monitor.yml", ref = "main", mode = "test", fetchImpl = fetch }) {
+async function dispatchWorkflow({ owner, repo, token, workflow = "monitor.yml", ref = "main", mode = "test", fetchImpl = githubFetch }) {
   const response = await fetchImpl(`${repoApiBase(owner, repo)}/actions/workflows/${workflow}/dispatches`, {
     method: "POST",
     headers: githubHeaders(token),
@@ -115,10 +134,10 @@ async function dispatchWorkflow({ owner, repo, token, workflow = "monitor.yml", 
   return { status: "dispatched", mode };
 }
 
-async function listWorkflowRuns({ owner, repo, token, workflow = "monitor.yml", perPage = 20, fetchImpl = fetch }) {
+async function listWorkflowRuns({ owner, repo, token, workflow = "monitor.yml", perPage = 20, fetchImpl = githubFetch, timeoutMs }) {
   const response = await fetchImpl(
     `${repoApiBase(owner, repo)}/actions/workflows/${encodeURIComponent(workflow)}/runs?per_page=${perPage}`,
-    { headers: githubHeaders(token) }
+    { headers: githubHeaders(token), timeoutMs }
   );
   const body = await readJsonResponse(response, "Could not list workflow runs.");
   return (body.workflow_runs || []).map((run) => ({
@@ -134,12 +153,23 @@ async function listWorkflowRuns({ owner, repo, token, workflow = "monitor.yml", 
   }));
 }
 
-async function getRepoFile({ owner, repo, token, path: filePath, ref = "main", fetchImpl = fetch }) {
+async function getRepoFile({ owner, repo, token, path: filePath, ref = "main", fetchImpl = githubFetch, timeoutMs }) {
   const response = await fetchImpl(
     `${repoApiBase(owner, repo)}/contents/${encodeURIComponent(filePath).replace(/%2F/g, "/")}?ref=${encodeURIComponent(ref)}`,
-    { headers: githubHeaders(token) }
+    { headers: githubHeaders(token), timeoutMs }
   );
   if (response.status === 404) {
+    // A missing repository (no access, wrong name) also answers 404, and
+    // treating that as "the file is empty" showed 0 manuscripts without any
+    // warning. Ask the repository endpoint to tell the two apart.
+    const repoResponse = await fetchImpl(repoApiBase(owner, repo), { headers: githubHeaders(token), timeoutMs });
+    if (repoResponse.status === 404) {
+      const error = new Error(
+        `无法访问 ${owner}/${repo}：仓库不存在，或这个 token 没有被授权访问它。`
+      );
+      error.status = 404;
+      throw error;
+    }
     return { exists: false, content: null, sha: null };
   }
   const body = await readJsonResponse(response, `Could not read ${filePath}.`);
@@ -147,7 +177,7 @@ async function getRepoFile({ owner, repo, token, path: filePath, ref = "main", f
   return { exists: true, content, sha: body.sha };
 }
 
-async function putRepoFile({ owner, repo, token, path: filePath, content, sha, message, branch = "main", fetchImpl = fetch }) {
+async function putRepoFile({ owner, repo, token, path: filePath, content, sha, message, branch = "main", fetchImpl = githubFetch }) {
   const response = await fetchImpl(
     `${repoApiBase(owner, repo)}/contents/${encodeURIComponent(filePath).replace(/%2F/g, "/")}`,
     {

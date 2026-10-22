@@ -119,7 +119,11 @@ function missingToday(schedule, runs, now = new Date()) {
   const minute = String(parseMinute(schedule.WINDOW_MINUTE ?? 17)).padStart(2, "0");
   // Count covered windows, not raw runs: manual runs, fallback wake-ups and
   // duplicate dispatches must not make a skipped window look like it ran.
-  const covered = new Set();
+  // A window only counts as done when a run for it succeeded. Counting any
+  // completed run made a failed check look like a covered window, so `missing`
+  // was always zero.
+  const succeeded = new Set();
+  const failedWindows = new Set();
   for (const run of runs) {
     if (dayKey(run.createdAt) !== today || run.status !== "completed") {
       continue;
@@ -128,13 +132,20 @@ function missingToday(schedule, runs, now = new Date()) {
     if (!match) {
       continue;
     }
-    covered.add(`${match[2]}:${minute}`);
+    const window = `${match[2]}:${minute}`;
+    if (run.conclusion === "success") {
+      succeeded.add(window);
+    } else if (!run.manual) {
+      // Fallback wake-ups retry the same window, so count windows, not runs.
+      failedWindows.add(window);
+    }
   }
-  const done = due.filter((window) => covered.has(window)).length;
-  const failed = runs.filter(
-    (run) => dayKey(run.createdAt) === today && run.status === "completed" && run.conclusion !== "success",
-  ).length;
-  return { due: due.length, planned: windows.length, done, failed, missing: Math.max(due.length - done, 0) };
+  // A window that failed still counts as "not done": the user needs to see both
+  // that it ran and that it did not succeed.
+  const done = due.filter((window) => succeeded.has(window)).length;
+  const failed = due.filter((window) => failedWindows.has(window)).length;
+  const missing = Math.max(due.length - done, 0);
+  return { due: due.length, planned: windows.length, done, failed, missing };
 }
 
 function deriveHealth({ runs = [], schedule = {}, now = new Date() } = {}) {
@@ -177,6 +188,14 @@ function deriveHealth({ runs = [], schedule = {}, now = new Date() } = {}) {
       ...base,
       state: "error",
       headline: `最近一次检查失败（${beijingClock(lastRun.createdAt)}${lastRun.manual ? "，手动" : "，自动"}）${streak}`,
+      consecutiveFailures,
+    };
+  }
+  if (counts.failed > 0) {
+    return {
+      ...base,
+      state: "warn",
+      headline: `最近一次检查成功（${beijingClock(lastRun.createdAt)}），但今天有 ${counts.failed} 个时间点失败了`,
       consecutiveFailures,
     };
   }
@@ -224,30 +243,50 @@ function summarizeManuscripts(data) {
 function unarchiveRecord(data, needle, now = new Date()) {
   const text = String(needle ?? "").trim().toLowerCase();
   if (!text) {
-    throw new Error("需要稿件 ID 或标题片段");
+    const error = new Error("需要稿件 ID 或完整标题");
+    error.status = 400;
+    throw error;
   }
   const next = JSON.parse(JSON.stringify(data || {}));
-  const restored = [];
-  for (const [key, record] of Object.entries(next)) {
-    if (!record || typeof record !== "object") {
-      continue;
+  const archived = Object.entries(next).filter(
+    ([, record]) => record && typeof record === "object" && record.archived,
+  );
+
+  // Restore exactly one record. A loose substring used to match several papers
+  // at once, so clicking one row could un-archive unrelated ones.
+  const byId = archived.filter(([, record]) => String(record.id || "").trim().toLowerCase() === text);
+  const byTitle = archived.filter(
+    ([, record]) => String(record.title || "").trim().toLowerCase() === text,
+  );
+  let matches = byId.length ? byId : byTitle;
+  if (!matches.length) {
+    // A unique fragment is still accepted, so a partially copied title works;
+    // anything ambiguous is refused rather than guessed.
+    const loose = archived.filter(([, record]) =>
+      `${record.id || ""} ${record.title || ""}`.toLowerCase().includes(text),
+    );
+    if (loose.length === 1) {
+      matches = loose;
+    } else if (loose.length > 1) {
+      const error = new Error("匹配到多篇已归档稿件，请用完整稿件号或完整标题。");
+      error.status = 409;
+      throw error;
     }
-    const haystack = `${record.id || ""} ${record.title || ""}`.toLowerCase();
-    if (!haystack.includes(text) || !record.archived) {
-      continue;
-    }
-    delete record.archived;
-    delete record.archived_at;
-    delete record.archive_reason;
-    record.archive_suppressed = true;
-    record.suppress_until_status = record.status || "";
-    record.unarchived_at = now.toISOString().slice(0, 19).replace("T", " ");
-    restored.push(record.id || key);
   }
-  if (!restored.length) {
-    throw new Error("没有匹配到已归档的稿件");
+  if (!matches.length) {
+    const error = new Error("没有匹配到已归档的稿件，请刷新列表后重试。");
+    error.status = 404;
+    throw error;
   }
-  return { data: next, restored };
+
+  const [key, record] = matches[0];
+  delete record.archived;
+  delete record.archived_at;
+  delete record.archive_reason;
+  record.archive_suppressed = true;
+  record.suppress_until_status = record.status || "";
+  record.unarchived_at = now.toISOString().slice(0, 19).replace("T", " ");
+  return { data: next, restored: [record.id || key] };
 }
 
 module.exports = {

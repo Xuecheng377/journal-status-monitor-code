@@ -109,7 +109,11 @@ function nextAvailablePlatformSlot(platform, existingSecrets, plannedSecrets) {
     }
   }
   const kind = platformKind(platform);
-  throw new Error(`${kind?.label || platform} 已达到 ${MAX_PLATFORM_SLOTS} 个账号上限。`);
+  const error = new Error(`${kind?.label || platform} 已达到 ${MAX_PLATFORM_SLOTS} 个账号上限。`);
+  // A validation problem, not a server fault: the UI must show it as a form
+  // error instead of a 500.
+  error.status = 400;
+  throw error;
 }
 
 function assignPlatformValues(values, platform, slot, account) {

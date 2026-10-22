@@ -1,6 +1,9 @@
 :root {
   --bg: #f4f7fb;
   --panel: #ffffff;
+  --surface: #ffffff;
+  --surface-soft: #f8fafc;
+  --surface-soft-2: #eef2f7;
   --ink: #172033;
   --muted: #667085;
   --line: #d6deea;
@@ -98,7 +101,7 @@ header p,
   border-radius: 999px;
   padding: 4px 8px;
   color: var(--muted);
-  background: #f8fafc;
+  background: var(--surface-soft);
   font-size: 12px;
 }
 
@@ -119,7 +122,7 @@ header p {
 
 button {
   border: 1px solid var(--line);
-  background: #ffffff;
+  background: var(--surface);
   color: var(--ink);
   padding: 9px 13px;
   border-radius: 6px;
@@ -139,7 +142,7 @@ button.primary:hover {
 
 button.ghost {
   padding: 6px 9px;
-  background: #f8fafc;
+  background: var(--surface-soft);
   color: var(--muted);
   font-size: 12px;
 }
@@ -189,7 +192,7 @@ h3 {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 14px;
-  background: #ffffff;
+  background: var(--surface);
 }
 
 .card-title-row {
@@ -247,22 +250,33 @@ h3 {
 
 .account-row {
   display: grid;
-  grid-template-columns: minmax(140px, 0.8fr) minmax(240px, 1.4fr) auto;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.4fr) auto;
   gap: 14px;
   align-items: center;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 12px;
-  background: #ffffff;
+  background: var(--surface);
+  min-width: 0;
 }
 
 .account-main {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .account-title {
   font-weight: 700;
+}
+
+/* Long addresses and URLs must wrap instead of widening the grid and pushing
+   the action buttons outside the visible area. */
+.account-title,
+.account-meta span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .account-meta {
@@ -275,6 +289,7 @@ h3 {
 .account-actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .status-pill {
@@ -284,7 +299,7 @@ h3 {
   border-radius: 999px;
   padding: 3px 8px;
   color: var(--muted);
-  background: #f8fafc;
+  background: var(--surface-soft);
   font-size: 12px;
 }
 
@@ -321,7 +336,7 @@ textarea {
   border: 1px solid #c7d0dd;
   border-radius: 6px;
   color: var(--ink);
-  background: #ffffff;
+  background: var(--surface);
   padding: 9px 10px;
   font: inherit;
   min-height: 38px;
@@ -384,7 +399,7 @@ pre {
   padding: 16px;
   overflow: auto;
   color: #27364b;
-  background: #f8fafc;
+  background: var(--surface-soft);
   border-top: 1px solid var(--line);
   min-height: 120px;
   font-size: 12px;
@@ -546,7 +561,7 @@ pre {
   color: var(--ink);
   text-decoration: none;
   font-size: 13px;
-  background: #ffffff;
+  background: var(--surface);
 }
 
 .run:hover {
@@ -558,7 +573,7 @@ pre {
   border-radius: 999px;
   padding: 2px 9px;
   font-size: 12px;
-  background: #eef2f7;
+  background: var(--surface-soft-2);
   color: var(--muted);
 }
 
@@ -614,7 +629,7 @@ pre {
 }
 
 .rules-card code {
-  background: #eef2f7;
+  background: var(--surface-soft-2);
   border-radius: 4px;
   padding: 1px 4px;
 }
@@ -623,13 +638,15 @@ pre {
   display: grid;
   gap: 10px;
   padding: 0 16px 12px;
+  min-width: 0;
 }
 
 .manuscript {
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 12px 14px;
-  background: #ffffff;
+  background: var(--surface);
+  min-width: 0;
 }
 
 .manuscript-head {
@@ -645,9 +662,21 @@ pre {
   font-size: 13px;
 }
 
+/* A long unbroken title or URL used to widen this grid track and push the
+   restore button off-screen, so allow any string to wrap. */
+.ms-id,
+.ms-title,
+.ms-status,
+.ms-meta span,
+.tag {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .ms-status {
   color: var(--ink);
-  background: #eef2f7;
+  background: var(--surface-soft-2);
   border-radius: 999px;
   padding: 2px 10px;
   font-size: 12px;
@@ -672,7 +701,7 @@ pre {
   border-radius: 999px;
   padding: 2px 9px;
   font-size: 12px;
-  background: #f2f4f7;
+  background: var(--surface-soft-2);
   color: var(--muted);
 }
 
@@ -700,6 +729,65 @@ pre {
   padding: 6px 0;
 }
 
+/* Below this width the fixed sidebar takes more than a fifth of the screen and
+   leaves the content cramped, so the same links move to a top bar. Hiding the
+   sidebar (the old behaviour) removed the only way to reach the other panels. */
+@media (max-width: 1180px) {
+  aside {
+    position: sticky;
+    inset: auto;
+    top: 0;
+    z-index: 20;
+    width: auto;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+  }
+
+  .brand {
+    margin: 0;
+    font-size: 16px;
+    white-space: nowrap;
+  }
+
+  nav {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 4px;
+  }
+
+  nav a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
+    padding: 8px 10px;
+    white-space: nowrap;
+  }
+
+  .aside-foot {
+    display: none;
+  }
+
+  main {
+    margin-left: 0;
+    padding: 20px 16px 32px;
+  }
+}
+
+@media (max-width: 640px) {
+  aside {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  nav {
+    justify-content: flex-start;
+  }
+}
+
 @media (max-width: 900px) {
   .stat-grid {
     grid-template-columns: 1fr 1fr;
@@ -716,15 +804,6 @@ pre {
 }
 
 @media (max-width: 900px) {
-  aside {
-    display: none;
-  }
-
-  main {
-    margin-left: 0;
-    padding: 18px;
-  }
-
   header {
     display: grid;
   }
@@ -735,5 +814,47 @@ pre {
 
   .panel-title {
     display: grid;
+  }
+}
+
+/* One visible focus ring everywhere: the default outline was removed from the
+   inputs, which left keyboard users unable to see where they were. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+@media (prefers-color-scheme: dark) {
+  /* Follow the OS theme; a bright panel at night was the most common
+     complaint about the page. */
+  :root {
+    --bg: #0b1220;
+    --panel: #111a2b;
+    --surface: #16223a;
+    --surface-soft: #1b2942;
+    --surface-soft-2: #202f4a;
+    --ink: #e6edf7;
+    --muted: #9aa8bf;
+    --line: #24334d;
+    --blue: #5b8def;
+    --blue-dark: #7aa5ff;
+    --red: #ff8a80;
+    --green: #4ade80;
+    --amber: #fbbf24;
+    color-scheme: dark;
+  }
+
+  aside {
+    background: #0a1018;
+  }
+
+  input,
+  select,
+  textarea {
+    color: var(--ink);
+  }
+
+  button:not(.primary) {
+    color: var(--ink);
   }
 }

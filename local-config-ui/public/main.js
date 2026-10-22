@@ -334,7 +334,19 @@ async function previewConfig() {
   }
 }
 
+let saving = false;
+
 async function saveConfig() {
+  // A second click while the first save is still running would write every
+  // Secret twice (and could lose the slot assignments), so ignore it.
+  if (saving) {
+    return;
+  }
+  saving = true;
+  const saveBtn = $("saveBtn");
+  const restoreLabel = saveBtn.textContent;
+  saveBtn.disabled = true;
+  saveBtn.textContent = "正在保存...";
   setStatus("正在保存...");
   $("preview").textContent = "";
   showMessages(["请等待，正在写入 GitHub Secrets；如果勾选部署 Cloudflare，会继续执行部署。"], "warn");
@@ -357,6 +369,9 @@ async function saveConfig() {
     if (result.workflowResult) {
       messages.push("已触发 GitHub Actions 测试邮件 workflow。");
     }
+    if (result.warnings?.length) {
+      messages.push(...result.warnings);
+    }
     if (result.existingSecrets) {
       existingSecrets = result.existingSecrets;
     }
@@ -366,12 +381,16 @@ async function saveConfig() {
       renderAccountList();
       messages.push("账号管理列表已刷新。");
     }
-    showMessages(messages, "ok");
+    showMessages(messages, result.warnings?.length ? "warn" : "ok");
     $("preview").textContent = JSON.stringify(result, null, 2);
   } catch (error) {
     setStatus("保存失败");
     showMessages(error.errors || [String(error)], "error");
     $("preview").textContent = JSON.stringify(error, null, 2);
+  } finally {
+    saving = false;
+    saveBtn.disabled = false;
+    saveBtn.textContent = restoreLabel;
   }
 }
 

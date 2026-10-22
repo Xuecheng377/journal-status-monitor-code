@@ -62,7 +62,13 @@ async function readJson(req) {
   if (!chunks.length) {
     return {};
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    const error = new Error("请求体不是合法 JSON，请刷新页面后重试。");
+    error.status = 400;
+    throw error;
+  }
 }
 
 async function readSlotAssignments() {
@@ -179,6 +185,12 @@ function userFacingError(error) {
   }
   if (message.includes("ENOTFOUND") || message.includes("EAI_AGAIN")) {
     return `连不上 GitHub（网络或 DNS 问题）：${message}`;
+  }
+  if (/fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR|network|socket hang up/i.test(message)) {
+    return "连不上 GitHub：请检查网络或代理后重试。如果一直失败，先确认浏览器能打开 github.com。";
+  }
+  if (/^Server Error$|^Internal Server Error$|not a JSON|Unexpected token/i.test(message)) {
+    return "GitHub 返回了异常响应（服务端错误或维护中），稍后重试；如果持续出现，请检查 token 是否仍有效。";
   }
   return message;
 }
@@ -308,9 +320,14 @@ async function handleSave(req, res) {
     jsonResponse(res, 400, { ok: false, errors });
     return;
   }
+  // Check every action the user asked for before the first write, so a
+  // rejected request never leaves Secrets or wrangler.toml changed.
+  if (actions.deployCloudflare && !tokens.cloudflareToken?.trim()) {
+    jsonResponse(res, 400, { ok: false, errors: ["勾选部署 Cloudflare 时，Cloudflare API Token 必填。"] });
+    return;
+  }
 
   const secrets = mergeExistingSecretValues(settingsWithSlots, existingSecrets);
-  await writeSlotAssignments(slotState.assignments);
   const updatedSecrets = [];
   const keptSecrets = [];
   for (const [name, value] of Object.entries(secrets)) {
@@ -318,16 +335,33 @@ async function handleSave(req, res) {
       keptSecrets.push(name);
       continue;
     }
-    await putRepoSecret({
-      owner: repo.owner,
-      repo: repo.repo,
-      token: tokens.githubToken.trim(),
-      name,
-      value,
-    });
+    try {
+      await putRepoSecret({
+        owner: repo.owner,
+        repo: repo.repo,
+        token: tokens.githubToken.trim(),
+        name,
+        value,
+      });
+    } catch (error) {
+      // Secrets cannot be restored once written, so report exactly which ones
+      // made it instead of failing silently in the middle of the loop.
+      jsonResponse(res, 500, {
+        ok: false,
+        errors: [
+          `写入 ${name} 失败：${userFacingError(error)}`,
+          updatedSecrets.length
+            ? `已写入 ${updatedSecrets.length} 个 Secret（${updatedSecrets.join("、")}），wrangler.toml 未改动。`
+            : "没有写入任何 Secret。",
+        ],
+        writtenSecrets: updatedSecrets.sort(),
+      });
+      return;
+    }
     updatedSecrets.push(name);
   }
 
+  await writeSlotAssignments(slotState.assignments);
   await fs.writeFile(WRANGLER_PATH, buildWranglerToml(settingsWithSlots), "utf8");
   const currentMetadata = await readPlatformMetadata();
   const nextMetadata = {
@@ -336,25 +370,30 @@ async function handleSave(req, res) {
   };
   await writePlatformMetadata(nextMetadata);
 
+  const warnings = [];
   let deployResult = null;
   if (actions.deployCloudflare) {
-    if (!tokens.cloudflareToken?.trim()) {
-      jsonResponse(res, 400, { ok: false, errors: ["勾选部署 Cloudflare 时，Cloudflare API Token 必填。"] });
-      return;
+    try {
+      deployResult = await deployCloudflare(tokens.cloudflareToken.trim());
+    } catch (error) {
+      warnings.push(`配置已保存，但部署 Cloudflare 失败：${userFacingError(error)}`);
     }
-    deployResult = await deployCloudflare(tokens.cloudflareToken.trim());
   }
 
   let workflowResult = null;
   if (actions.dispatchTest) {
-    workflowResult = await dispatchWorkflow({
-      owner: repo.owner,
-      repo: repo.repo,
-      workflow: repo.workflow,
-      ref: repo.ref,
-      token: tokens.githubToken.trim(),
-      mode: "test",
-    });
+    try {
+      workflowResult = await dispatchWorkflow({
+        owner: repo.owner,
+        repo: repo.repo,
+        workflow: repo.workflow,
+        ref: repo.ref,
+        token: tokens.githubToken.trim(),
+        mode: "test",
+      });
+    } catch (error) {
+      warnings.push(`配置已保存，但测试运行没有触发：${userFacingError(error)}`);
+    }
   }
 
   const refreshedSecrets = await listRepoSecrets({
@@ -370,6 +409,7 @@ async function handleSave(req, res) {
     wranglerPath: WRANGLER_PATH,
     deployResult,
     workflowResult,
+    warnings,
     existingSecrets: refreshedSecrets,
     accounts: listPlatformAccounts(refreshedSecrets, nextMetadata),
   });
@@ -421,6 +461,10 @@ async function handleDeleteAccount(req, res) {
 // workflow both read it, and neither stores it in the public code repo.
 const STATE_REPO = String(process.env.STATE_REPO || "Xuecheng377/data_storage").trim();
 
+// Restores are serialised: two concurrent requests would otherwise read the
+// same file sha and the second commit would fail.
+let unarchiveQueue = Promise.resolve();
+
 function stateRepoCoordinates() {
   const [owner, repo] = STATE_REPO.split("/");
   return { owner: owner || "Xuecheng377", repo: repo || "data_storage" };
@@ -446,23 +490,54 @@ async function handleStatus(req, res) {
   } catch (error) {
     schedule = {};
   }
+  // The status panel is a quick read, so both requests run at once and give up
+  // after a couple of seconds instead of leaving the page spinning.
+  const STATUS_TIMEOUT_MS = 2000;
+  const stateRepo = stateRepoCoordinates();
+  const [runsResult, fileResult] = await Promise.allSettled([
+    listWorkflowRuns({
+      owner,
+      repo,
+      token,
+      workflow: DEFAULT_WORKFLOW,
+      perPage: 20,
+      timeoutMs: STATUS_TIMEOUT_MS,
+    }),
+    getRepoFile({
+      ...stateRepo,
+      token,
+      path: "data/manuscripts.json",
+      ref: DEFAULT_REF,
+      timeoutMs: STATUS_TIMEOUT_MS,
+    }),
+  ]);
+
   let runs = [];
   let runsError = "";
-  try {
-    runs = await listWorkflowRuns({ owner, repo, token, workflow: DEFAULT_WORKFLOW, perPage: 20 });
-  } catch (error) {
-    runsError = userFacingError(error);
+  if (runsResult.status === "fulfilled") {
+    runs = runsResult.value;
+  } else {
+    runsError = userFacingError(runsResult.reason);
   }
+
   let manuscripts = { active: [], archived: [], counts: { total: 0, active: 0, archived: 0 } };
   let dataError = "";
-  try {
-    const stateRepo = stateRepoCoordinates();
-    const file = await getRepoFile({ ...stateRepo, token, path: "data/manuscripts.json", ref: DEFAULT_REF });
-    manuscripts = file.exists ? summarizeManuscripts(JSON.parse(file.content)) : manuscripts;
-  } catch (error) {
-    dataError = userFacingError(error);
+  if (fileResult.status === "fulfilled") {
+    try {
+      manuscripts = fileResult.value.exists ? summarizeManuscripts(JSON.parse(fileResult.value.content)) : manuscripts;
+    } catch (error) {
+      dataError = userFacingError(error);
+    }
+  } else {
+    dataError = userFacingError(fileResult.reason);
   }
   const health = deriveHealth({ runs, schedule });
+  if (runsError) {
+    // Without this the empty run list reads as "never triggered", which hides
+    // an expired token or a missing permission behind a wrong conclusion.
+    health.state = "error";
+    health.headline = runsError;
+  }
   jsonResponse(res, 200, {
     ok: true,
     repo: `${owner}/${repo}`,
@@ -516,25 +591,52 @@ async function handleUnarchive(req, res) {
     return;
   }
   const stateRepo = stateRepoCoordinates();
-  const file = await getRepoFile({ ...stateRepo, token, path: "data/manuscripts.json", ref: DEFAULT_REF });
-  if (!file.exists) {
-    jsonResponse(res, 404, {
-      ok: false,
-      errors: [`状态仓 ${STATE_REPO} 里还没有 data/manuscripts.json`],
+  // Two clicks in a row used to read the same sha and the second commit lost
+  // the race with a 500. Serialise restores so the second one sees the result
+  // of the first.
+  const run = unarchiveQueue.then(async () => {
+    const file = await getRepoFile({ ...stateRepo, token, path: "data/manuscripts.json", ref: DEFAULT_REF });
+    if (!file.exists) {
+      jsonResponse(res, 404, {
+        ok: false,
+        errors: [`状态仓 ${STATE_REPO} 里还没有 data/manuscripts.json`],
+      });
+      return;
+    }
+    const current = JSON.parse(file.content);
+    let outcome;
+    try {
+      outcome = unarchiveRecord(current, body.needle);
+    } catch (error) {
+      if (error?.status === 404) {
+        const text = String(body.needle ?? "").trim().toLowerCase();
+        const already = Object.values(current).some(
+          (record) =>
+            record &&
+            (String(record.id || "").trim().toLowerCase() === text ||
+              String(record.title || "").trim().toLowerCase() === text),
+        );
+        if (already) {
+          jsonResponse(res, 409, { ok: false, errors: ["这篇稿件已经在监控中，不需要再恢复。"] });
+          return;
+        }
+      }
+      throw error;
+    }
+    const { data, restored } = outcome;
+    const commit = await putRepoFile({
+      ...stateRepo,
+      token,
+      path: "data/manuscripts.json",
+      content: JSON.stringify(data, null, 2) + "\n",
+      sha: file.sha,
+      message: "chore: 恢复稿件监测 [skip ci]",
+      branch: DEFAULT_REF,
     });
-    return;
-  }
-  const { data, restored } = unarchiveRecord(JSON.parse(file.content), body.needle);
-  const commit = await putRepoFile({
-    ...stateRepo,
-    token,
-    path: "data/manuscripts.json",
-    content: JSON.stringify(data, null, 2) + "\n",
-    sha: file.sha,
-    message: "chore: 恢复稿件监测 [skip ci]",
-    branch: DEFAULT_REF,
+    jsonResponse(res, 200, { ok: true, restored, commit: commit.commit });
   });
-  jsonResponse(res, 200, { ok: true, restored, commit: commit.commit });
+  unarchiveQueue = run.catch(() => {});
+  await run;
 }
 
 async function deployCloudflare(token) {
@@ -596,7 +698,8 @@ async function route(req, res) {
     textResponse(res, 404, "Not found");
   } catch (error) {
     const rejected = /Only local requests|Unexpected Host header/.test(error?.message || "");
-    jsonResponse(res, rejected ? 403 : 500, {
+    const status = rejected ? 403 : Number.isInteger(error?.status) ? error.status : 500;
+    jsonResponse(res, status, {
       ok: false,
       errors: [userFacingError(error)],
     });
