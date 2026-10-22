@@ -1,0 +1,254 @@
+name: Journal Status Monitor
+run-name: Journal Status Monitor (${{ inputs.mode || 'manual' }} window=${{ inputs.window || 'manual' }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Run mode
+        required: true
+        default: normal
+        type: choice
+        options:
+          - normal
+          - test
+          - daily_report
+      window:
+        description: Beijing trigger window, for fallback dedupe
+        required: false
+        default: manual
+
+concurrency:
+  # Stateful runs share one queue so two of them can never interleave writes to
+  # data/manuscripts.json. A plain test run only sends one email, so it gets its
+  # own group and can never block the schedule.
+  group: journal-status-monitor-${{ inputs.mode == 'test' && 'mail' || 'state' }}
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    # A hung Chrome used to hold the queue for the platform default of 6 hours,
+    # pushing every later window behind it.
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        shell: bash
+        run: |
+          set -e
+          branch="${GITHUB_REF_NAME:-main}"
+          git init -q .
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git fetch --depth=1 origin "$branch"
+          git checkout -q -B "$branch" FETCH_HEAD
+
+      # The manuscript state is personal data, so it lives in a private
+      # repository and this public repository never stores it again.
+      - name: Restore state baseline
+        shell: bash
+        env:
+          STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
+          STATE_REPO: ${{ vars.STATE_REPO }}
+        run: |
+          set -e
+          repo="${STATE_REPO:-Xuecheng377/data_storage}"
+          if [ -z "$STATE_REPO_TOKEN" ]; then
+            echo "STATE_REPO_TOKEN is not configured; refusing to run without a baseline." >&2
+            exit 1
+          fi
+          # A pasted secret often carries a trailing newline or space, and a raw
+          # token with any punctuation breaks URL parsing ("Port number was not a
+          # decimal number"). Trim it, check the shape, and keep the credential in
+          # a credential file instead of embedding it in the remote URL.
+          token="$(printf '%s' "$STATE_REPO_TOKEN" | tr -d '[:space:]')"
+          case "$token" in
+            github_pat_*|ghp_*|github_pat_) ;;
+            *)
+              echo "STATE_REPO_TOKEN does not look like a GitHub token (length ${#token}, prefix ${token:0:10})." >&2
+              case "$token" in
+                */*) echo "It looks like a repository name: put that in the STATE_REPO variable and the PAT in this secret." >&2 ;;
+                *) echo "Paste the value of a fine-grained PAT whose Contents permission covers ${repo}." >&2 ;;
+              esac
+              exit 1
+              ;;
+          esac
+          credentials="$RUNNER_TEMP/.git-credentials"
+          printf 'https://x-access-token:%s@github.com\n' "$token" > "$credentials"
+          chmod 600 "$credentials"
+          git config --global credential.helper "store --file $credentials"
+          git clone --quiet --depth=1 "https://github.com/${repo}.git" state
+          ls -l state/data
+
+      - name: Check Python
+        shell: bash
+        run: |
+          set -e
+          python3 --version
+          python3 -m venv --help >/dev/null
+
+      - name: Check Chrome
+        shell: bash
+        run: |
+          set -e
+          if command -v google-chrome >/dev/null 2>&1; then
+            google-chrome --version
+          elif command -v google-chrome-stable >/dev/null 2>&1; then
+            google-chrome-stable --version
+          elif command -v chromium-browser >/dev/null 2>&1; then
+            chromium-browser --version
+          elif command -v chromium >/dev/null 2>&1; then
+            chromium --version
+          else
+            echo "Chrome/Chromium is not available on this runner." >&2
+            exit 1
+          fi
+
+      - name: Ensure Xvfb
+        shell: bash
+        run: |
+          set -e
+          if ! command -v xvfb-run >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq xvfb
+          fi
+          xvfb-run --help >/dev/null
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -e
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install --retries 5 --timeout 60 -r requirements.txt
+
+      - name: Run unit tests
+        shell: bash
+        run: |
+          set -e
+          . .venv/bin/activate
+          python -m unittest discover -s tests -t . -v
+
+      - name: Resolve run mode
+        id: mode
+        shell: bash
+        run: |
+          echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
+          echo "window=${{ github.event.inputs.window }}" >> "$GITHUB_OUTPUT"
+          echo "Trigger window: ${{ github.event.inputs.window }}"
+
+      - name: Run monitor
+        id: monitor
+        env:
+          IEEE_EMAIL: ${{ secrets.IEEE_EMAIL }}
+          IEEE_PASSWORD: ${{ secrets.IEEE_PASSWORD }}
+          IEEE_URL: ${{ secrets.IEEE_URL }}
+          IEEE_2_EMAIL: ${{ secrets.IEEE_2_EMAIL }}
+          IEEE_2_PASSWORD: ${{ secrets.IEEE_2_PASSWORD }}
+          IEEE_2_URL: ${{ secrets.IEEE_2_URL }}
+          IEEE_3_EMAIL: ${{ secrets.IEEE_3_EMAIL }}
+          IEEE_3_PASSWORD: ${{ secrets.IEEE_3_PASSWORD }}
+          IEEE_3_URL: ${{ secrets.IEEE_3_URL }}
+          IEEE_4_EMAIL: ${{ secrets.IEEE_4_EMAIL }}
+          IEEE_4_PASSWORD: ${{ secrets.IEEE_4_PASSWORD }}
+          IEEE_4_URL: ${{ secrets.IEEE_4_URL }}
+          IEEE_5_EMAIL: ${{ secrets.IEEE_5_EMAIL }}
+          IEEE_5_PASSWORD: ${{ secrets.IEEE_5_PASSWORD }}
+          IEEE_5_URL: ${{ secrets.IEEE_5_URL }}
+          ELSEVIER_EMAIL: ${{ secrets.ELSEVIER_EMAIL }}
+          ELSEVIER_PASSWORD: ${{ secrets.ELSEVIER_PASSWORD }}
+          ELSEVIER_URL: ${{ secrets.ELSEVIER_URL }}
+          ELSEVIER_2_EMAIL: ${{ secrets.ELSEVIER_2_EMAIL }}
+          ELSEVIER_2_PASSWORD: ${{ secrets.ELSEVIER_2_PASSWORD }}
+          ELSEVIER_2_URL: ${{ secrets.ELSEVIER_2_URL }}
+          ELSEVIER_3_EMAIL: ${{ secrets.ELSEVIER_3_EMAIL }}
+          ELSEVIER_3_PASSWORD: ${{ secrets.ELSEVIER_3_PASSWORD }}
+          ELSEVIER_3_URL: ${{ secrets.ELSEVIER_3_URL }}
+          ELSEVIER_4_EMAIL: ${{ secrets.ELSEVIER_4_EMAIL }}
+          ELSEVIER_4_PASSWORD: ${{ secrets.ELSEVIER_4_PASSWORD }}
+          ELSEVIER_4_URL: ${{ secrets.ELSEVIER_4_URL }}
+          ELSEVIER_5_EMAIL: ${{ secrets.ELSEVIER_5_EMAIL }}
+          ELSEVIER_5_PASSWORD: ${{ secrets.ELSEVIER_5_PASSWORD }}
+          ELSEVIER_5_URL: ${{ secrets.ELSEVIER_5_URL }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          ARCHIVE_TERMINAL: ${{ secrets.ARCHIVE_TERMINAL }}
+          INCLUDE_ARCHIVED_IN_REPORT: ${{ secrets.INCLUDE_ARCHIVED_IN_REPORT }}
+          TERMINAL_STATUS_KEYWORDS: ${{ secrets.TERMINAL_STATUS_KEYWORDS }}
+          DATA_FILE: state/data/manuscripts.json
+          # Every uploaded artifact on a public repository is public: keep only a
+          # hashed snapshot, and fail rather than mail "everything is new" when the
+          # private state repository is not mounted.
+          REDACT_DEBUG_ARTIFACTS: 'true'
+          REQUIRE_BASELINE: 'true'
+          # Run a real windowed Chrome under Xvfb: a headed browser is challenged
+          # far less often than a headless one by publisher bot protection.
+          HEADLESS: 'false'
+          SAVE_DEBUG_ARTIFACTS: 'true'
+          # A silent green run is worse than a red one: fetching nothing is a
+          # failure, and an account error must fail the job.
+          # A secret overrides the default; an empty secret keeps the code default.
+          FAIL_ON_EMPTY: ${{ secrets.FAIL_ON_EMPTY }}
+          NOTIFY_ON_FIRST_SEEN: ${{ secrets.NOTIFY_ON_FIRST_SEEN }}
+          ALERT_COOLDOWN_HOURS: ${{ secrets.ALERT_COOLDOWN_HOURS }}
+          LOG_FULL_TITLES: 'false'
+        shell: bash
+        run: |
+          set -e
+          . .venv/bin/activate
+          xvfb-run --auto-servernum --server-args="-screen 0 1440x1200x24" \
+            python monitor.py --mode "${{ steps.mode.outputs.mode }}"
+
+      - name: List debug files
+        if: always()
+        shell: bash
+        run: |
+          if [ -d debug ]; then
+            find debug -maxdepth 2 -type f -print | sort
+          else
+            echo "No debug directory."
+          fi
+
+      # The manuscript list as the portal actually rendered it. Kept for a week so
+      # "my paper never showed up" can be answered from evidence, not guesswork.
+      - name: Upload list snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manuscript-list-${{ github.run_number }}
+          path: debug/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Commit state changes
+        # Only a real change is worth a commit. A run that only refreshed
+        # last_checked used to add ~6 empty commits per day.
+        if: always() && steps.monitor.outputs.data_changed == 'true'
+        shell: bash
+        run: |
+          set -e
+          cd state
+          git config user.name "github-actions[bot]"
+          git add data
+          if git diff --staged --quiet; then
+            echo "No data changes."
+            exit 0
+          fi
+          git commit -q -m "Update manuscript data [skip ci]"
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:main"; then
+              echo "Pushed on attempt $attempt."
+              exit 0
+            fi
+            echo "Push failed (attempt $attempt); rebasing on the latest remote state."
+            git pull --rebase --quiet origin main || { echo "Rebase failed; leaving the commit unpushed." >&2; exit 1; }
+          done
+          echo "Could not push state changes after 3 attempts." >&2
+          exit 1

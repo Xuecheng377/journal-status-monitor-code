@@ -1,0 +1,3 @@
+# Selenium Manager ships with Selenium 4 and resolves the driver that matches the
+# runner's Chrome, so no separate webdriver-manager dependency is needed.
+selenium>=4.20,<5.0

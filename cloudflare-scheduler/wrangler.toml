@@ -1,0 +1,25 @@
+name = "journal-status-monitor-scheduler"
+main = "worker.js"
+compatibility_date = "2026-05-26"
+# Cron only: this Worker never needs a public HTTP route, and staying off
+# workers.dev keeps the scheduler unpublishable from the internet.
+workers_dev = false
+
+[vars]
+GITHUB_OWNER = "Xuecheng377"
+GITHUB_REPO = "journal-status-monitor"
+GITHUB_WORKFLOW = "monitor.yml"
+GITHUB_REF = "main"
+DAILY_REPORT_HOUR = "8"
+WEEKLY_REPORT_DAY = "1"
+NORMAL_HOURS = "0,4,8,12,16,20"
+WINDOW_MINUTE = "17"
+WINDOW_TOLERANCE_MINUTES = "20"
+
+[triggers]
+# One cron only. Cloudflare weekdays are 1 = Sunday .. 7 = Saturday, so a
+# "0 * * 1" weekly entry silently fires on Sunday; the Worker decides the
+# weekly-report window from DAILY_REPORT_HOUR/WEEKLY_REPORT_DAY instead.
+crons = [
+  "17,27,37 0,4,8,12,16,20 * * *"
+]

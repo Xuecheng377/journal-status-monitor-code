@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>期刊状态监控</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <aside>
+    <div class="brand">期刊状态监控</div>
+    <nav>
+      <a href="#status" data-tab="status" class="active">运行状态</a>
+      <a href="#manuscripts" data-tab="manuscripts">稿件清单</a>
+      <a href="#platforms" data-tab="platforms">投稿账号</a>
+      <a href="#email" data-tab="email">邮件通知</a>
+      <a href="#schedule" data-tab="schedule">检查时间</a>
+      <a href="#runtime" data-tab="runtime">高级设置</a>
+      <a href="#deploy" data-tab="deploy">保存与部署</a>
+    </nav>
+    <div class="aside-foot">只监听 127.0.0.1，token 只存在本页内存中</div>
+  </aside>
+
+  <main>
+    <header>
+      <div>
+        <h1 id="pageTitle">运行状态</h1>
+        <p id="pageHint">先填一次 GitHub Token，就能看到监控是否真的在跑。</p>
+      </div>
+      <div class="header-actions">
+        <button id="refreshStatusBtn" type="button" class="primary">刷新状态</button>
+      </div>
+    </header>
+
+    <div id="tokenBar" class="token-bar">
+      <label>GitHub Token
+        <input id="githubToken" type="password" placeholder="只需勾选 Contents / Actions / Secrets 读写的 fine-grained token" autocomplete="off">
+      </label>
+      <button id="checkSecretsBtn" type="button">检查已配置 Secret</button>
+      <span class="hint">Token 只存在当前页面，关闭即失效</span>
+    </div>
+
+    <section id="healthBanner" class="health health-idle">
+      <span class="dot"></span>
+      <div>
+        <strong id="healthHeadline">还没有读取状态</strong>
+        <span id="healthDetail">填入 Token 后点"刷新状态"</span>
+      </div>
+    </section>
+
+    <section id="status" class="panel tab-panel">
+      <div class="panel-title">
+        <h2>运行状态</h2>
+        <span id="statusMeta">—</span>
+      </div>
+      <div class="stat-grid">
+        <div class="stat"><span class="stat-label">最近一次成功</span><strong id="statLastSuccess">—</strong></div>
+        <div class="stat"><span class="stat-label">今天已跑 / 计划</span><strong id="statToday">—</strong></div>
+        <div class="stat"><span class="stat-label">下次自动检查</span><strong id="statNext">—</strong></div>
+        <div class="stat"><span class="stat-label">在监控 / 已归档</span><strong id="statCounts">—</strong></div>
+      </div>
+      <div class="inline-actions">
+        <button id="runNowBtn" type="button" class="primary">立即检查一次</button>
+        <span id="runNowHint" class="hint">会触发一次真实抓取，大约 1-3 分钟</span>
+      </div>
+      <h3 class="sub-heading">最近运行</h3>
+      <div id="runList" class="run-list"></div>
+    </section>
+
+    <section id="manuscripts" class="panel tab-panel">
+      <div class="panel-title">
+        <h2>稿件清单</h2>
+        <span id="manuscriptMeta">—</span>
+      </div>
+      <div class="rules-card">
+        <strong>当前规则</strong>
+        <ul>
+          <li>新稿件第一次被记录时一定发邮件（包括一出现就是终态的）</li>
+          <li>状态里带 <code>Reject</code> 就算被拒，记录归档、不再跟踪</li>
+          <li>归档的稿件不会再出现在周报里；需要时可在下面"恢复监测"</li>
+        </ul>
+      </div>
+      <h3 class="sub-heading">在监控</h3>
+      <div id="activeList" class="manuscript-list"></div>
+      <h3 class="sub-heading">已归档</h3>
+      <div id="archivedList" class="manuscript-list"></div>
+    </section>
+
+    <section id="platforms" class="panel tab-panel">
+      <div class="panel-title">
+        <h2>投稿账号</h2>
+        <span>新增账号会写入下一个空槽位，不替换已有账号</span>
+      </div>
+      <div class="grid two">
+        <div class="card">
+          <h3>IEEE ScholarOne</h3>
+          <label class="check"><input id="enableIeeeOverwrite" type="checkbox"> 设置或覆盖这组旧 IEEE 配置</label>
+          <label>投稿系统网址<input id="ieeeUrl" placeholder="https://mc.manuscriptcentral.com/..."></label>
+          <label>登录邮箱 / 用户名<input id="ieeeEmail" autocomplete="username"></label>
+          <label>登录密码<input id="ieeePassword" type="password" autocomplete="current-password" placeholder="已配置时留空保持不变"></label>
+          <span id="ieeeStatus" class="secret-status">未检查旧配置</span>
+        </div>
+        <div class="card">
+          <h3>Elsevier Editorial Manager</h3>
+          <label class="check"><input id="enableElsevierOverwrite" type="checkbox"> 设置或覆盖这组旧 Elsevier 配置</label>
+          <label>投稿系统网址<input id="elsevierUrl" placeholder="https://www.editorialmanager.com/..."></label>
+          <label>登录邮箱 / 用户名<input id="elsevierEmail" autocomplete="username"></label>
+          <label>登录密码<input id="elsevierPassword" type="password" autocomplete="current-password" placeholder="已配置时留空保持不变"></label>
+          <span id="elsevierStatus" class="secret-status">未检查旧配置</span>
+        </div>
+      </div>
+      <div class="subsection bordered">
+        <div class="subsection-title">
+          <h3>新增投稿账号</h3>
+          <span>填写这里才是新增；可以添加多组账号</span>
+        </div>
+        <div id="platformAdditions" class="stack"></div>
+        <button id="addPlatformBtn" type="button">新增一组投稿账号</button>
+      </div>
+      <div class="subsection bordered">
+        <div class="subsection-title">
+          <h3>已有账号槽位</h3>
+          <span>GitHub Secrets 不能读取密码明文；邮箱和网址仅显示本地保存过的非敏感记录</span>
+        </div>
+        <div class="account-toolbar">
+          <button id="refreshAccountsBtn" type="button">刷新账号列表</button>
+        </div>
+        <div id="accountList" class="account-list"></div>
+      </div>
+    </section>
+
+    <section id="email" class="panel tab-panel">
+      <div class="panel-title">
+        <h2>邮件通知</h2>
+        <span>用于测试邮件、新稿提醒、状态变化邮件和每周一报告</span>
+      </div>
+      <div class="grid two">
+        <label>发件邮箱<input id="emailSender" placeholder="sender@example.com"></label>
+        <label>SMTP 授权码<input id="emailPassword" type="password" placeholder="已配置时留空保持不变"></label>
+        <label>收件人<input id="emailReceivers" placeholder="receiver@example.com"></label>
+        <label>SMTP 服务器<input id="smtpServer" placeholder="留空则按邮箱域名自动推断"></label>
+        <label>SMTP 端口<input id="smtpPort" inputmode="numeric" placeholder="465 或 587"></label>
+      </div>
+    </section>
+
+    <section id="schedule" class="panel tab-panel">
+      <div class="panel-title">
+        <h2>检查时间</h2>
+        <span>均为北京时间；系统会自动添加 27/37 分兜底触发</span>
+      </div>
+      <div class="grid two">
+        <div class="card">
+          <h3>每周报告</h3>
+          <label>星期
+            <select id="weeklyDay">
+              <option value="1">周一</option>
+              <option value="2">周二</option>
+              <option value="3">周三</option>
+              <option value="4">周四</option>
+              <option value="5">周五</option>
+              <option value="6">周六</option>
+              <option value="0">周日</option>
+            </select>
+          </label>
+          <label>小时<input id="weeklyHour" inputmode="numeric" value="8"></label>
+          <label>主触发分钟<input id="weeklyMinute" inputmode="numeric" value="17"></label>
+        </div>
+        <div class="card">
+          <h3>普通状态检查</h3>
+          <label>每天检查小时，英文逗号分隔
+            <input id="normalHours" value="0,4,8,12,16,20">
+          </label>
+          <label>主触发分钟<input id="normalMinute" inputmode="numeric" value="17"></label>
+          <p class="hint">例：填 0,4,8,12,16,20 会在 0:17/27/37、4:17/27/37 …… 每 4 小时唤醒一次，兜底点自动去重。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="runtime" class="panel tab-panel">
+      <div class="panel-title">
+        <h2>高级设置</h2>
+        <span>通常保持默认即可；改错会导致漏报或重复报警</span>
+      </div>
+      <div class="grid two">
+        <label class="check"><input id="archiveTerminal" type="checkbox" checked> 终态稿件自动归档（带 Reject 的也算终态）</label>
+        <label class="check"><input id="includeArchived" type="checkbox"> 周报包含已归档稿件</label>
+        <label class="check"><input id="notifyOnFirstSeen" type="checkbox" checked> 新稿件一定要发提醒</label>
+        <label class="check"><input id="failOnEmpty" type="checkbox" checked> 一条稿件都没抓到就判定失败</label>
+        <label class="wide">终态关键词（留空 = 使用代码内置值）
+          <textarea id="terminalKeywords" placeholder="留空即使用内置默认，不要随便填"></textarea>
+        </label>
+        <label class="wide">失败告警冷却（小时）
+          <input id="alertCooldown" inputmode="numeric" placeholder="6">
+        </label>
+      </div>
+    </section>
+
+    <section id="deploy" class="panel tab-panel">
+      <div class="panel-title">
+        <h2>保存与部署</h2>
+        <span>保存会写入 GitHub Secrets，并改写 cloudflare-scheduler/wrangler.toml</span>
+      </div>
+      <div class="grid two">
+        <label>Cloudflare API Token<input id="cloudflareToken" type="password" placeholder="部署 Worker 时需要"></label>
+        <label class="check"><input id="deployCloudflare" type="checkbox" checked> 保存后部署 Cloudflare Worker</label>
+        <label class="check"><input id="dispatchTest" type="checkbox"> 保存后触发测试邮件 workflow</label>
+        <button id="loadBtn" type="button">加载当前配置</button>
+        <button id="previewBtn" type="button">预览将要写入的配置</button>
+        <button id="saveBtn" type="button" class="primary">保存</button>
+      </div>
+    </section>
+
+    <section class="panel" id="resultPanel">
+      <div class="panel-title">
+        <h2>预览 / 结果</h2>
+        <span id="statusText">尚未预览</span>
+      </div>
+      <div id="messages" class="messages"></div>
+      <pre id="preview"></pre>
+    </section>
+  </main>
+
+  <script src="/main.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

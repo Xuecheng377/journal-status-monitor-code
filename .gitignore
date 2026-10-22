@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Environment variables and local secrets
+.env
+*.local
+
+# Data and logs
+data/
+# The manuscript state is cloned here from a private repo at run time.
+state/
+logs/
+*.log
+
+# Debug artifacts can contain a logged-in page (titles, session tokens)
+debug/
+
+# Node
+node_modules/
+
+# Local brainstorming / scratch files
+.superpowers/
+config-ui-concept.html
+verify/
+
+# IDE and OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Browser drivers
+chromedriver
+geckodriver
