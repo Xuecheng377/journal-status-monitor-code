@@ -23,7 +23,8 @@
 - 状态数据保存到 `data/manuscripts.json`
 - 周报发送记录保存到 `data/manuscripts.meta.json`
 - 解析失败时在 `debug/` 落盘脱敏截图和 HTML，供动作日志定位；`debug/` 已被 `.gitignore` 忽略
-- 抓取失败不再"绿色通过"：任一账号登录失败、解析为 0 条，都会让运行变红并单独发一封失败告警邮件
+- 抓取失败不再"绿色通过"：任一账号登录失败、解析为 0 条，都会让运行变红
+- 但告警邮件不会在第一次失败时就发：一个窗口有 17、27、37 三次唤醒，只有最后一次仍然失败才发信，所以十分钟后自愈的 Cloudflare 拦截不会打扰你
 - 邮件发送失败不会丢数据：状态先不落盘，下一轮继续重试，直到通知真正发出
 - 终态判定改为"覆盖词 + 关键词 - 否决词"：状态里带 `Reject` 就归档（含 `Reject and Resubmit`），`Required Reviews Completed`、`Awaiting Final Decision` 不会被误归档
 - 状态解析失败时保留上一次状态并标记 stale，不再发出 `Under Review -> Unknown` 这类假告警
@@ -288,6 +289,8 @@ python monitor.py --unarchive "part of the title"
 | `LOG_FULL_TITLES` | `false` | 动作日志是否打印完整论文题目 |
 | `STEALTH_MODE` | `true` | 是否传 `--disable-blink-features=AutomationControlled` 并去掉 `navigator.webdriver` 与 HeadlessChrome 标识 |
 | `ALERT_COOLDOWN_HOURS` | `6` | 同类失败告警的最小间隔，防止每 3 小时刷一次邮箱 |
+| `ALERT_ON_LAST_ATTEMPT_ONLY` | `true` | 只在窗口最后一次唤醒（17/27/37 中的 37）仍失败时才发告警邮件；设为 `false` 回到"第一次失败就发" |
+| `WINDOW_CRON_FILE` | `cloudflare-scheduler/wrangler.toml` | 从 Worker 的 cron 里读出唤醒分钟表，避免代码和调度各写一份 |
 | `CHALLENGE_WAIT_SECONDS` | `20` | 遇到人机校验页时最多等多久（等自动通过） |
 | `ACCOUNT_RETRIES` | `1` | 单个账号失败后重试次数，重试用全新会话 |
 
@@ -350,7 +353,9 @@ GitHub Actions 的 `schedule` 不保证准点，可能延迟，也可能在高�
 
 ### 运行显示红色是不是说明监控坏了？
 
-现在红色代表"确实有问题"：账号登录失败、页面解析为 0 条、邮件发不出去，都会让运行失败，并额外发一封"监控失败"告警邮件。以前这些情况会显示绿色成功，导致你以为在监控而其实已经停摆。
+现在红色代表"确实有问题"：账号登录失败、页面解析为 0 条、邮件发不出去，都会让运行失败。以前这些情况会显示绿色成功，导致你以为在监控而其实已经停摆。
+
+红色不等于马上会收到邮件：17 分那次红了，27、37 分还会再试一次；只有最后一次仍然红，才会发"监控失败"告警邮件。所以偶尔看到一个红叉、十分钟后又变绿，是兜底重试正常工作，不是监控坏了。
 
 ### 邮件发不出去，状态变化会丢吗？
 
@@ -362,8 +367,10 @@ GitHub Actions 的 `schedule` 不保证准点，可能延迟，也可能在高�
 
 ### 日志里出现 `Just a moment...` 或 `title='Just a moment...'`
 
-这是出版社前置的 Cloudflare 人机校验页，说明这次没有真正打开登录页。程序已经把这次运行判为失败，并按冷却间隔发告警邮件。
+这是出版社前置的 Cloudflare 人机校验页，说明这次没有真正打开登录页。程序已经把这次运行判为失败，40 秒内（20 秒等待 + 一次全新会话重试）过不去就换下一个账号。
 
+- 之后 Worker 会在 27 分、37 分兜底唤醒同一窗口；多数拦截十分钟后就自己好了
+- 告警邮件只在最后一次唤醒（37 分）仍然失败时才发，按 `ALERT_COOLDOWN_HOURS` 冷却，所以瞬时拦截不会吵到你
 - workflow 现在用 `xvfb-run` 以"有窗口"的 Chrome 运行，比 headless 更容易通过校验
 - 连续多次登录会提高被挑战的概率；把检查频率降到每天 2-3 次会明显更稳
 - GitHub 托管 runner 的 IP 属于数据中心网段，被挑战是常态，这一点无法只靠代码解决
