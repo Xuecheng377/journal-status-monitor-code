@@ -969,7 +969,13 @@ class JournalMonitor:
 
     def _apply(self, result) -> None:
         self.storage.apply(result)
-        self._emit_output("data_changed", "true" if result.meaningful else "false")
+        # A failure alert rewrites the meta file (the cooldown timestamp), and a
+        # partial run can still carry a real change from the account that did
+        # load. Both must be committed: emitting "false" afterwards used to skip
+        # the commit step entirely, so the throttle reset every window and the
+        # same change was mailed again on the next successful run.
+        changed = bool(getattr(result, "meaningful", False)) or bool(getattr(self, "_alert_sent", False))
+        self._emit_output("data_changed", "true" if changed else "false")
 
     def _alert(self, problems: List[str]) -> None:
         """Send a failure alert, throttled so a recurring fault cannot spam."""
@@ -990,7 +996,9 @@ class JournalMonitor:
             meta["last_failure_alert_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.storage.save_meta(meta)
             # The meta file must be committed even when the run fails, otherwise
-            # the cooldown resets on the next attempt.
+            # the cooldown resets on the next attempt. _apply() re-emits this at
+            # the end of the run, so remember it here as well.
+            self._alert_sent = True
             self._emit_output("data_changed", "true")
 
     def _write_step_summary(self) -> None:

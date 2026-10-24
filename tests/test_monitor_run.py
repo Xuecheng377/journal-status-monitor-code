@@ -103,6 +103,37 @@ class MonitorRunTests(unittest.TestCase):
         self.assertIn("login rejected", notifier.alerts[0][0])
         self.assertEqual(len(notifier.changes), 1)
 
+    def test_failure_alert_emits_data_changed_so_the_cooldown_gets_committed(self):
+        # The commit step is gated on this output. Emitting "false" from the
+        # later _apply() skipped the commit, so the alert cooldown reset and the
+        # next window mailed the same failure again.
+        notifier = FakeNotifier()
+        monitor = self.make_monitor(notifier, problems=["IEEE fetch failed: Just a moment..."])
+        output_path = os.path.join(self._tmp.name, "github_output")
+        with open(output_path, "w", encoding="utf-8"):
+            pass
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": output_path}):
+            self.assertEqual(monitor.run("normal"), 1)
+        with open(output_path, "r", encoding="utf-8") as handle:
+            emitted = [line.strip() for line in handle if line.strip()]
+        self.assertIn("data_changed=true", emitted)
+        self.assertEqual(emitted[-1], "data_changed=true", "the last emitted value wins")
+
+    def test_run_without_changes_and_without_problems_does_not_ask_for_a_commit(self):
+        notifier = FakeNotifier()
+        monitor = self.make_monitor(notifier)
+        output_path = os.path.join(self._tmp.name, "github_output_quiet")
+        with open(output_path, "w", encoding="utf-8"):
+            pass
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": output_path}):
+            self.assertEqual(monitor.run("normal"), 0)  # first run announces the new paper
+            with open(output_path, "w", encoding="utf-8"):
+                pass
+            self.assertEqual(monitor.run("normal"), 0)  # nothing changed this time
+        with open(output_path, "r", encoding="utf-8") as handle:
+            emitted = [line.strip() for line in handle if line.strip()]
+        self.assertEqual(emitted[-1], "data_changed=false")
+
     def test_repeated_failures_are_alerted_once_per_cooldown(self):
         notifier = FakeNotifier()
         monitor = self.make_monitor(notifier, problems=["IEEE fetch failed: Just a moment..."])
