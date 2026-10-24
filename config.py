@@ -220,6 +220,15 @@ class Config:
     # Failure alerts are throttled: a Cloudflare challenge that repeats every
     # window must not bury the inbox, but it must still be visible once.
     ALERT_COOLDOWN_HOURS = int_env("ALERT_COOLDOWN_HOURS", 6)
+    # A blocked window is woken again on the fallback minutes (:27, :37). Mailing
+    # on the first failure paged the inbox for a challenge that cleared ten
+    # minutes later, so only the last wake-up of a window may alert.
+    ALERT_ON_LAST_ATTEMPT_ONLY = bool_env("ALERT_ON_LAST_ATTEMPT_ONLY", True)
+    # Where the Worker's cron lives. Its minute list is the source of truth for
+    # "how many chances does this window get", so the monitor never has to guess.
+    WINDOW_CRON_FILE = first_env(
+        "WINDOW_CRON_FILE", default="cloudflare-scheduler/wrangler.toml"
+    ) or "cloudflare-scheduler/wrangler.toml"
     SAVE_DEBUG_ARTIFACTS = bool_env("SAVE_DEBUG_ARTIFACTS", True)
     # The code repository is public, so debug artifacts are public too: redact
     # identifiers and titles before they are uploaded.

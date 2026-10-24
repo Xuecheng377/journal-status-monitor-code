@@ -977,9 +977,27 @@ class JournalMonitor:
         changed = bool(getattr(result, "meaningful", False)) or bool(getattr(self, "_alert_sent", False))
         self._emit_output("data_changed", "true" if changed else "false")
 
+    def _attempt_minutes(self) -> List[int]:
+        """Minute list of the Worker cron, read from the checked-out config."""
+        try:
+            text = Path(Config.WINDOW_CRON_FILE).read_text(encoding="utf-8")
+        except OSError:
+            return []
+        return attempt_minutes_from_wrangler(text)
+
     def _alert(self, problems: List[str]) -> None:
         """Send a failure alert, throttled so a recurring fault cannot spam."""
         if not problems:
+            return
+        defer, reason = should_defer_failure_alert(
+            os.getenv("RUN_WINDOW", ""),
+            self._attempt_minutes(),
+            datetime.now(),
+            enabled=Config.ALERT_ON_LAST_ATTEMPT_ONLY,
+        )
+        if defer:
+            print(f"Failure alert held back: {reason}")
+            self._summary["note"] = reason
             return
         cooldown = Config.ALERT_COOLDOWN_HOURS
         meta = self.storage.load_meta()
@@ -1162,6 +1180,53 @@ class JournalMonitor:
         if not result.has_changes:
             print("No status changes detected.")
         return 0
+
+
+def attempt_minutes_from_wrangler(text: str) -> List[int]:
+    """Minute-of-hour values the Worker can use to wake a window.
+
+    The cron list is the only honest source for "how many chances does this
+    window get": one wake-up means the first failure is already the last one.
+    Anything that is not a plain comma list is ignored, and an empty result
+    makes the caller alert immediately instead of staying silent.
+    """
+    section = text.split("[triggers]", 1)[-1] if "[triggers]" in text else text
+    minutes = set()
+    for expression in re.findall(r'"([^"]+)"', section):
+        fields = expression.split()
+        if len(fields) != 5:
+            continue
+        minute_field, _hour, dom, month, dow = fields
+        if (dom, month, dow) != ("*", "*", "*"):
+            continue
+        parts = [part.strip() for part in minute_field.split(",") if part.strip().isdigit()]
+        if not parts or len(parts) != len(minute_field.split(",")):
+            continue
+        minutes.update(int(part) for part in parts if 0 <= int(part) <= 59)
+    return sorted(minutes)
+
+
+def should_defer_failure_alert(
+    window: str,
+    attempt_minutes: List[int],
+    now: datetime,
+    enabled: bool = True,
+) -> tuple[bool, str]:
+    """Hold a failure alert back while the window still has a fallback wake-up."""
+    if not enabled:
+        return False, ""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}", window or ""):
+        return False, ""  # manual or test dispatch: no retry is coming
+    if not attempt_minutes:
+        return False, ""  # unknown schedule: alert rather than stay silent
+    last = max(attempt_minutes)
+    if now.minute >= last:
+        return False, ""
+    schedule = "、".join(f":{minute:02d}" for minute in sorted(set(attempt_minutes)))
+    return True, (
+        f"窗口 {window} 还有兜底唤醒（{schedule}），现在才 :{now.minute:02d}；"
+        "最后一次唤醒仍然失败时才发送告警邮件。"
+    )
 
 
 def resolve_mode(cli_mode: str | None) -> str:

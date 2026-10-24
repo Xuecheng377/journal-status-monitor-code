@@ -8,17 +8,33 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
 from config import Config, PlatformAccount
 from storage import ManuscriptStorage
 
 try:  # selenium is only needed to import monitor, not to exercise run()
-    from monitor import JournalMonitor
+    from monitor import JournalMonitor, attempt_minutes_from_wrangler, should_defer_failure_alert
 
     SELENIUM_AVAILABLE = True
 except Exception:  # pragma: no cover - depends on the environment
     SELENIUM_AVAILABLE = False
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def frozen_clock(hour, minute):
+    """Stand-in for monitor.datetime whose now() is pinned to one minute."""
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 24, hour, minute)
+
+    return FrozenDateTime
 
 
 class FakeNotifier:
@@ -142,6 +158,32 @@ class MonitorRunTests(unittest.TestCase):
         monitor.run("normal")
         self.assertEqual(len(notifier.alerts), 1, "a repeating fault must not spam the inbox")
 
+    def test_first_wake_up_of_a_window_stays_quiet_until_the_fallback_is_used(self):
+        notifier = FakeNotifier()
+        monitor = self.make_monitor(notifier, problems=["IEEE fetch failed: Just a moment..."])
+        with patch.dict(os.environ, {"RUN_WINDOW": "2026-10-24T08"}):
+            with patch("monitor.datetime", frozen_clock(8, 17)):
+                self.assertEqual(monitor.run("normal"), 1)
+            self.assertEqual(notifier.alerts, [], "the :27 retry has not run yet")
+            with patch("monitor.datetime", frozen_clock(8, 27)):
+                self.assertEqual(monitor.run("normal"), 1)
+            self.assertEqual(notifier.alerts, [], "the :37 retry is still coming")
+            with patch("monitor.datetime", frozen_clock(8, 37)):
+                self.assertEqual(monitor.run("normal"), 1)
+        self.assertEqual(len(notifier.alerts), 1, "the last wake-up is the one that mails")
+
+    def test_recovered_window_never_mails(self):
+        notifier = FakeNotifier()
+        failing = self.make_monitor(notifier, problems=["IEEE fetch failed: Just a moment..."])
+        with patch.dict(os.environ, {"RUN_WINDOW": "2026-10-24T08"}):
+            with patch("monitor.datetime", frozen_clock(8, 17)):
+                self.assertEqual(failing.run("normal"), 1)
+        healthy = self.make_monitor(FakeNotifier())
+        with patch.dict(os.environ, {"RUN_WINDOW": "2026-10-24T08"}):
+            with patch("monitor.datetime", frozen_clock(8, 27)):
+                self.assertEqual(healthy.run("normal"), 0)
+        self.assertEqual(notifier.alerts, [], "a fallback that worked must not page the inbox")
+
     def test_daily_report_with_no_active_manuscripts_is_not_a_failure(self):
         notifier = FakeNotifier()
         monitor = self.make_monitor(
@@ -219,6 +261,50 @@ class MonitorRunTests(unittest.TestCase):
         self.assertEqual(monitor.run("daily_report"), 0)
         self.assertEqual(len(notifier.reports), 1)
         self.assertEqual(len(notifier.reports[0]), 1)
+
+
+@unittest.skipUnless(SELENIUM_AVAILABLE, "selenium is not installed")
+class FailureAlertTimingTests(unittest.TestCase):
+    """The mail only fires once the window has no fallback wake-up left."""
+
+    def test_cron_minutes_are_read_from_the_worker_config(self):
+        text = (REPO_ROOT / "cloudflare-scheduler" / "wrangler.toml").read_text(encoding="utf-8")
+        self.assertEqual(attempt_minutes_from_wrangler(text), [17, 27, 37])
+
+    def test_unparsable_cron_falls_back_to_alerting(self):
+        self.assertEqual(attempt_minutes_from_wrangler("crons = [\"* * * * *\"]"), [])
+        self.assertEqual(attempt_minutes_from_wrangler("no triggers here"), [])
+
+    def test_first_attempt_defers(self):
+        defer, reason = should_defer_failure_alert(
+            "2026-10-24T08", [17, 27, 37], datetime(2026, 10, 24, 8, 17)
+        )
+        self.assertTrue(defer)
+        self.assertIn(":37", reason)
+
+    def test_last_attempt_alerts(self):
+        for minute in (37, 41):
+            defer, _ = should_defer_failure_alert(
+                "2026-10-24T08", [17, 27, 37], datetime(2026, 10, 24, 8, minute)
+            )
+            self.assertFalse(defer, f"{minute} 分已经是最后一次唤醒")
+
+    def test_manual_dispatch_alerts_at_once_because_nothing_will_retry_it(self):
+        for window in ("", "manual", "manual-verify-3"):
+            defer, _ = should_defer_failure_alert(window, [17, 27, 37], datetime(2026, 10, 24, 8, 17))
+            self.assertFalse(defer)
+
+    def test_single_wake_up_schedule_alerts_at_once(self):
+        defer, _ = should_defer_failure_alert(
+            "2026-10-24T08", [17], datetime(2026, 10, 24, 8, 17)
+        )
+        self.assertFalse(defer)
+
+    def test_switched_off_keeps_the_old_behaviour(self):
+        defer, _ = should_defer_failure_alert(
+            "2026-10-24T08", [17, 27, 37], datetime(2026, 10, 24, 8, 17), enabled=False
+        )
+        self.assertFalse(defer)
 
 
 if __name__ == "__main__":
