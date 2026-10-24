@@ -198,6 +198,11 @@ jobs:
           FAIL_ON_EMPTY: ${{ secrets.FAIL_ON_EMPTY }}
           NOTIFY_ON_FIRST_SEEN: ${{ secrets.NOTIFY_ON_FIRST_SEEN }}
           ALERT_COOLDOWN_HOURS: ${{ secrets.ALERT_COOLDOWN_HOURS }}
+          # A failed first attempt is retried at the fallback minutes (:27, :37),
+          # so the monitor holds the failure alert back until the last wake-up.
+          # An empty secret keeps the default (on).
+          ALERT_ON_LAST_ATTEMPT_ONLY: ${{ secrets.ALERT_ON_LAST_ATTEMPT_ONLY }}
+          RUN_WINDOW: ${{ github.event.inputs.window }}
           LOG_FULL_TITLES: 'false'
         shell: bash
         run: |
