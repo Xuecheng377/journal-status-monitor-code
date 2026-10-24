@@ -280,7 +280,16 @@ class FailureAlertTimingTests(unittest.TestCase):
             "2026-10-24T08", [17, 27, 37], datetime(2026, 10, 24, 8, 17)
         )
         self.assertTrue(defer)
+        self.assertIn(":27", reason)
         self.assertIn(":37", reason)
+
+    def test_reason_only_lists_the_wake_ups_that_are_still_ahead(self):
+        defer, reason = should_defer_failure_alert(
+            "2026-10-24T08", [17, 27, 37], datetime(2026, 10, 24, 8, 27)
+        )
+        self.assertTrue(defer)
+        self.assertIn(":37", reason)
+        self.assertNotIn(":17", reason)
 
     def test_last_attempt_alerts(self):
         for minute in (37, 41):

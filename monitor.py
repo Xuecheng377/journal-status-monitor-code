@@ -1084,6 +1084,17 @@ class JournalMonitor:
         if mode == "test":
             return 0 if self.notifier.send_test_email() else 1
 
+        # Say out loud when this window's last chance is, so "why was no mail
+        # sent" or "why am I only hearing about this now" is answerable from the
+        # log alone.
+        window = os.getenv("RUN_WINDOW", "").strip() or "manual"
+        minutes = self._attempt_minutes()
+        print(
+            f"Alert policy: window={window} wake-ups="
+            f"{','.join(f':{minute:02d}' for minute in minutes) or 'unknown'}"
+            f" mail_only_on_last={Config.ALERT_ON_LAST_ATTEMPT_ONLY}"
+        )
+
         manuscripts, problems = self.collect_manuscripts()
         print(f"Fetched {len(manuscripts)} manuscript(s).")
         self._summary["fetched"] = len(manuscripts)
@@ -1222,7 +1233,9 @@ def should_defer_failure_alert(
     last = max(attempt_minutes)
     if now.minute >= last:
         return False, ""
-    schedule = "、".join(f":{minute:02d}" for minute in sorted(set(attempt_minutes)))
+    schedule = "、".join(
+        f":{minute:02d}" for minute in sorted(set(attempt_minutes)) if minute > now.minute
+    )
     return True, (
         f"窗口 {window} 还有兜底唤醒（{schedule}），现在才 :{now.minute:02d}；"
         "最后一次唤醒仍然失败时才发送告警邮件。"
