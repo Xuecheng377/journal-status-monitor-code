@@ -273,7 +273,10 @@ jobs:
         # nobody is mailed for a challenge that clears ten minutes later. On the
         # window's last wake-up (or if the retry cannot be queued) the step fails
         # and the run turns red, which is the only case worth an email.
-        if: steps.monitor.outcome == 'failure'
+        # Any outcome other than a clean success has to be accounted for here: this
+#        step is what decides whether the run may end green, so a skipped step
+#        (a typo, a cancelled monitor) must never silently look like success.
+        if: always() && steps.monitor.outcome != 'success'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
