@@ -22,6 +22,32 @@ from selenium.webdriver.support.ui import WebDriverWait
 from config import Config, PlatformAccount
 from notification import EmailNotifier
 from storage import ManuscriptStorage
+# Re-exported so callers and tests keep using one import path.
+from window_schedule import attempt_minutes_from_wrangler, should_defer_failure_alert
+
+# Markers used to tell a publisher's bot-protection interstitial from a real
+# page. Both the title and the rendered body matter: a challenge that has not
+# run its script yet has neither, which is why waiting is part of the check.
+CHALLENGE_TITLE_MARKERS = (
+    "just a moment",
+    "attention required",
+    "checking your browser",
+    "please wait",
+    "verifying you are human",
+)
+CHALLENGE_SELECTORS = (
+    "#challenge-form",
+    "#challenge-running",
+    "#cf-challenge-running",
+    "iframe[src*='challenges.cloudflare.com']",
+    "input[name='cf-turnstile-response']",
+)
+CHALLENGE_BODY_MARKERS = (
+    "just a moment",
+    "checking your browser",
+    "verifying you are human",
+    "enable javascript and cookies",
+)
 
 
 class JournalMonitor:
@@ -85,15 +111,71 @@ class JournalMonitor:
             print(f"Could not patch navigator.webdriver: {exc}")
 
     def _page_looks_like_challenge(self) -> bool:
-        """True when the page is a bot-protection interstitial, not the portal."""
+        """True when the page is a bot-protection interstitial, not the portal.
+
+        The title alone is not enough: a managed challenge paints an empty
+        document with a form and no inputs first, and only sets "Just a moment..."
+        once its script runs. That blank window is what the old check walked
+        straight into and reported as "login failed".
+        """
         if not self.driver:
             return False
         try:
             title = (self.driver.title or "").strip().lower()
         except Exception:
             return False
-        markers = ("just a moment", "attention required", "checking your browser", "please wait", "verifying you are human")
-        return any(marker in title for marker in markers)
+        if any(marker in title for marker in CHALLENGE_TITLE_MARKERS):
+            return True
+        try:
+            for selector in CHALLENGE_SELECTORS:
+                if self.driver.find_elements(By.CSS_SELECTOR, selector):
+                    return True
+            body = (self.driver.find_element(By.TAG_NAME, "body").text or "").strip().lower()
+        except Exception:
+            return False
+        return any(marker in body for marker in CHALLENGE_BODY_MARKERS)
+
+    def _login_form_ready(self) -> bool:
+        """A password field is the one field every ScholarOne login page has."""
+        if not self.driver:
+            return False
+        try:
+            return bool(self.driver.find_elements(By.CSS_SELECTOR, "input[type='password']"))
+        except Exception:
+            return False
+
+    def _open_login_page(self, account: PlatformAccount, slug: str) -> None:
+        """Open the portal and wait until it is really a login form.
+
+        Waiting here instead of failing on the first look is what turns the
+        "blank page" failures into a normal run: the page is JavaScript
+        rendered, so title='' password_inputs=0 forms=1 is a page in flight,
+        not a broken login.
+        """
+        if not self.driver:
+            raise RuntimeError("Browser driver is not initialized.")
+        self.driver.get(account.url)
+        time.sleep(2)
+        deadline = time.time() + Config.LOGIN_WAIT_SECONDS
+        while True:
+            if self._login_form_ready():
+                return
+            if self._page_looks_like_challenge():
+                if self._wait_out_challenge(account.name):
+                    continue
+                self._save_debug_artifacts(f"{slug}_challenge")
+                raise RuntimeError(
+                    "blocked by bot protection before the login form (challenge never cleared)"
+                )
+            if time.time() >= deadline:
+                break
+            time.sleep(2)
+        self._log_page_diagnosis(f"{account.name} page")
+        self._save_debug_artifacts(f"{slug}_login_failed")
+        raise RuntimeError(
+            f"login form never rendered within {Config.LOGIN_WAIT_SECONDS}s "
+            "(blank page or unknown interstitial, not a credential problem)"
+        )
 
     def _wait_out_challenge(self, label: str) -> bool:
         """Wait for an interstitial to clear. Returns True when a real page is up."""
@@ -256,11 +338,7 @@ class JournalMonitor:
         self._assert_account_url(account)
         print(f"Opening IEEE ScholarOne: {account.url}")
         self._current_account = account.name
-        self.driver.get(account.url)
-        time.sleep(2)
-        if not self._wait_out_challenge(account.name):
-            self._save_debug_artifacts("ieee_challenge")
-            raise RuntimeError("blocked by bot protection before the login form (challenge never cleared)")
+        self._open_login_page(account, "ieee")
 
         try:
             email_input = self._find_first(
@@ -321,11 +399,7 @@ class JournalMonitor:
         self._assert_account_url(account)
         print(f"Opening Elsevier Editorial Manager: {account.url}")
         self._current_account = account.name
-        self.driver.get(account.url)
-        time.sleep(3)
-        if not self._wait_out_challenge(account.name):
-            self._save_debug_artifacts("elsevier_challenge")
-            raise RuntimeError("blocked by bot protection before the login form (challenge never cleared)")
+        self._open_login_page(account, "elsevier")
 
         try:
             email_input = self._find_first(
@@ -1191,55 +1265,6 @@ class JournalMonitor:
         if not result.has_changes:
             print("No status changes detected.")
         return 0
-
-
-def attempt_minutes_from_wrangler(text: str) -> List[int]:
-    """Minute-of-hour values the Worker can use to wake a window.
-
-    The cron list is the only honest source for "how many chances does this
-    window get": one wake-up means the first failure is already the last one.
-    Anything that is not a plain comma list is ignored, and an empty result
-    makes the caller alert immediately instead of staying silent.
-    """
-    section = text.split("[triggers]", 1)[-1] if "[triggers]" in text else text
-    minutes = set()
-    for expression in re.findall(r'"([^"]+)"', section):
-        fields = expression.split()
-        if len(fields) != 5:
-            continue
-        minute_field, _hour, dom, month, dow = fields
-        if (dom, month, dow) != ("*", "*", "*"):
-            continue
-        parts = [part.strip() for part in minute_field.split(",") if part.strip().isdigit()]
-        if not parts or len(parts) != len(minute_field.split(",")):
-            continue
-        minutes.update(int(part) for part in parts if 0 <= int(part) <= 59)
-    return sorted(minutes)
-
-
-def should_defer_failure_alert(
-    window: str,
-    attempt_minutes: List[int],
-    now: datetime,
-    enabled: bool = True,
-) -> tuple[bool, str]:
-    """Hold a failure alert back while the window still has a fallback wake-up."""
-    if not enabled:
-        return False, ""
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}", window or ""):
-        return False, ""  # manual or test dispatch: no retry is coming
-    if not attempt_minutes:
-        return False, ""  # unknown schedule: alert rather than stay silent
-    last = max(attempt_minutes)
-    if now.minute >= last:
-        return False, ""
-    schedule = "、".join(
-        f":{minute:02d}" for minute in sorted(set(attempt_minutes)) if minute > now.minute
-    )
-    return True, (
-        f"窗口 {window} 还有兜底唤醒（{schedule}），现在才 :{now.minute:02d}；"
-        "最后一次唤醒仍然失败时才发送告警邮件。"
-    )
 
 
 def resolve_mode(cli_mode: str | None) -> str:

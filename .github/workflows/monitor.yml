@@ -29,10 +29,14 @@ jobs:
   monitor:
     runs-on: ubuntu-latest
     # A hung Chrome used to hold the queue for the platform default of 6 hours,
-    # pushing every later window behind it.
-    timeout-minutes: 20
+    # pushing every later window behind it. The hand-off step can sleep until
+    # the next wake-up minute (ten minutes), so the budget covers a full window.
+    timeout-minutes: 30
     permissions:
       contents: write
+      # The failed attempt queues its own retry: a red run would mail the owner
+      # even when the retry ten minutes later succeeds.
+      actions: write
 
     steps:
       - name: Checkout repository
@@ -142,6 +146,11 @@ jobs:
 
       - name: Run monitor
         id: monitor
+        # A failure here is retried ten minutes later in a fresh runner, so it
+        # must not colour this run red: a red run mails the repository owner
+        # immediately, which is exactly the noise this monitor is meant to
+        # avoid. The hand-off step below decides the run's real outcome.
+        continue-on-error: true
         env:
           IEEE_EMAIL: ${{ secrets.IEEE_EMAIL }}
           IEEE_PASSWORD: ${{ secrets.IEEE_PASSWORD }}
@@ -257,3 +266,30 @@ jobs:
           done
           echo "Could not push state changes after 3 attempts." >&2
           exit 1
+
+      - name: Hold the window for the fallback wake-up
+        # The attempt failed. While the window still has a fallback minute, this
+        # run sleeps until then and queues the retry itself, then ends green so
+        # nobody is mailed for a challenge that clears ten minutes later. On the
+        # window's last wake-up (or if the retry cannot be queued) the step fails
+        # and the run turns red, which is the only case worth an email.
+        if: steps.monitor.outcome == 'failure'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_MODE: ${{ steps.mode.outputs.mode }}
+          RUN_WINDOW: ${{ github.event.inputs.window }}
+          WINDOW_CRON_FILE: cloudflare-scheduler/wrangler.toml
+        run: |
+          set -e
+          . .venv/bin/activate
+          status=0
+          python retry_window.py || status=$?
+          if [ "$status" = "0" ]; then
+            {
+              echo ""
+              echo "> 本次抓取失败，已排队下一个兜底唤醒。这一轮按设计保持绿色，不发邮件。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          exit "$status"

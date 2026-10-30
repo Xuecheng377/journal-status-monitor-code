@@ -239,11 +239,17 @@ class Config:
     WAIT_SECONDS = int_env("WAIT_SECONDS", 20)
     PAGE_LOAD_TIMEOUT = int_env("PAGE_LOAD_TIMEOUT", 60)
     # Bot-protection interstitials ("Just a moment...") usually clear by
-    # themselves; waiting is cheaper than failing a whole window.
-    CHALLENGE_WAIT_SECONDS = int_env("CHALLENGE_WAIT_SECONDS", 20)
-    # One retry per account absorbs a transient challenge without turning the
-    # monitor into a blind feeder that reports success on nothing.
-    ACCOUNT_RETRIES = int_env("ACCOUNT_RETRIES", 1)
+    # themselves; waiting is cheaper than failing a whole window. 40s covers the
+    # JS challenge on a slow runner; the observed failures never cleared inside
+    # 20s but the next attempt ten minutes later always did.
+    CHALLENGE_WAIT_SECONDS = int_env("CHALLENGE_WAIT_SECONDS", 40)
+    # The login page is JavaScript rendered: title='' with a form and no inputs
+    # is a page still painting, not a broken login. Give it time to appear.
+    LOGIN_WAIT_SECONDS = int_env("LOGIN_WAIT_SECONDS", 30)
+    # Two retries per account (three attempts) absorb a transient challenge
+    # without turning the monitor into a blind feeder that reports success on
+    # nothing.
+    ACCOUNT_RETRIES = int_env("ACCOUNT_RETRIES", 2)
     # Keep the automation-flag suppression for site compatibility, but never fake
     # the browser user agent: a mismatched UA is what sites flag first.
     STEALTH_MODE = bool_env("STEALTH_MODE", True)
